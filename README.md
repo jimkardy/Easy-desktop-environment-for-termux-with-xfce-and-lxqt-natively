@@ -57,3 +57,56 @@ apt remove lxqt
 apt remove tigervnc
 ```
 
+## for people that hate scripts, try manually here:
+
+
+``` bash 
+apt update && apt upgrade -y
+```
+
+
+``` bash 
+pkg install x11-repo
+```
+
+``` bash 
+apt install xfce4 tigervnc xfce4-terminal chromium
+```
+
+``` bash 
+nano ~/.bashrc
+```
+
+``` bash 
+vncserver :1 -localhost no -interface 0.0.0.0
+export DISPLAY=":1"
+startxfce4
+
+```
+then restart termux.
+
+## This method is not recommended, use the script instead. it's easyer and effortless.
+
+## what vnc app should you use ? 
+
+open play store 
+
+search for avnc 
+
+download it 
+
+use your local IP and port e.g 
+
+127.0.0.1:5901
+
+
+### good luck! you now got a mini PC inside your phone at a touch of a finger :) 
+
+
+## this script is intended for older 32 bit devices to give them a new purpose.
+
+i also recommend doing
+
+``` bash 
+apt install synaptic
+```
