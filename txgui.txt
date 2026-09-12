@@ -1,0 +1,344 @@
+#!/bin/bash
+# =====================================================
+#  txgui - a simple helper for a full desktop on Termux
+#  Desktop: XFCE or LXQt. Remote: VNC on port 5901.
+#
+#  Commands:
+#     ./txgui install   installs everything (asks which
+#                       desktop you want). No password.
+#     ./txgui start     starts your desktop and VNC
+#                       (asks for the VNC password once,
+#                        the first time you start)
+#     ./txgui stop      stops your desktop and VNC
+#     ./txgui status    shows what is running
+#     ./txgui help      shows this text
+# =====================================================
+
+# some colors, only when the terminal supports them
+C_RESET="$(tput sgr0 2>/dev/null)"
+C_GREEN="$(tput setaf 2 2>/dev/null)"
+C_YELLOW="$(tput setaf 3 2>/dev/null)"
+C_RED="$(tput setaf 1 2>/dev/null)"
+C_BOLD="$(tput bold 2>/dev/null)"
+
+# where we remember which desktop you chose
+CONF="$HOME/.txgui.conf"
+FIRST=":1"        # display number, like in the manual guide
+PORT=5901         # vnc port = 5900 + display
+
+ok()    { echo -e "${C_GREEN}[*] ${C_RESET}$*"; }
+info()  { echo -e "${C_YELLOW}[-] ${C_RESET}$*"; }
+err()   { echo -e "${C_RED}[!] ${C_RESET}$*"; }
+
+# ----- small helpers ----------------------------------------------
+
+is_termux() {
+    [ -n "$PREFIX" ] || [ -n "$TERMUX_VERSION" ] || command -v termux-info >/dev/null 2>&1
+}
+
+load_config() {
+    DESK=""
+    [ -f "$CONF" ] && . "$CONF"
+    case "$DESK" in
+        xfce|lxqt) ;;
+        *) DESK="" ;;
+    esac
+}
+
+save_config() {
+    printf 'DESK=%s\n' "$1" > "$CONF"
+}
+
+# best-effort grab of your wifi IP
+my_ip() {
+    local ip=""
+    ip="$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | head -1 | cut -d/ -f1)"
+    [ -z "$ip" ] && ip="$(ip -4 -o addr show 2>/dev/null | grep -v '127.0.0.1' | awk '{print $4}' | head -1 | cut -d/ -f1)"
+    [ -z "$ip" ] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -z "$ip" ] && ip="$(getprop dhcp.wlan0.ipaddress 2>/dev/null)"
+    printf '%s' "$ip"
+}
+
+# is the vnc server for our display up right now?
+vnc_up() {
+    if command -v vncserver >/dev/null 2>&1 && \
+       vncserver -list 2>/dev/null | grep -qE "^${FIRST}([[:space:]]|$)"; then
+        return 0
+    fi
+    # tigervnc also leaves a pid file - use it as a backup check
+    for f in "$HOME/.vnc/"*":1.pid"; do
+        [ -f "$f" ] && return 0
+    done
+    return 1
+}
+
+# is a desktop session alive?
+session_up() {
+    case "$1" in
+        xfce) pgrep -f "xfce4-session" >/dev/null 2>&1 ;;
+        lxqt) pgrep -f "lxqt-session"  >/dev/null 2>&1 ;;
+    esac
+}
+
+# stop a desktop session, leave vnc alone
+stop_session() {
+    case "$1" in
+        xfce) pkill -f "xfce4-session" 2>/dev/null ;;
+        lxqt) pkill -f "lxqt-session" 2>/dev/null ;;
+        *)    pkill -f "xfce4-session" 2>/dev/null; pkill -f "lxqt-session" 2>/dev/null ;;
+    esac
+    sleep 1
+}
+
+# launch a desktop detached, so it survives this script
+start_desktop() {
+    mkdir -p "$HOME/.cache/txgui"
+    DISPLAY="$FIRST" nohup "$1" > "$HOME/.cache/txgui/$1.log" 2>&1 &
+    disown 2>/dev/null
+    sleep 2
+}
+
+# ----- install -----------------------------------------------------
+
+cmd_install() {
+    if ! is_termux; then
+        err "This does not look like Termux (PREFIX empty)."
+        err "It is made for Android + Termux, trying anyway."
+    fi
+
+    echo
+    echo -e "${C_BOLD}  ---- TXGUI - INSTALL ----${C_RESET}"
+    echo
+
+    DESK=""
+    while [ -z "$DESK" ]; do
+        echo "  Which desktop do you want?"
+        echo "    1) xfce  - full of features, a bit heavy"
+        echo "    2) lxqt  - light and fast, good for weak phones"
+        printf "  type 1 or 2: "
+        read -r pick
+        case "$pick" in
+            1|xfce|XFCE)        DESK=xfce ;;
+            2|lxqt|LXQt|LXQT)   DESK=lxqt ;;
+            *) err "\"${pick}\" is not an option, try again." ;;
+        esac
+    done
+
+    info "Installing $DESK, this can take a while..."
+    echo
+
+    if [ "$DESK" = "xfce" ]; then
+        apt update && apt upgrade -y || { err "apt update/upgrade failed."; return 1; }
+        pkg install -y x11-repo || { err "Could not enable x11-repo."; return 1; }
+        apt install -y xfce4 tigervnc xfce4-terminal chromium || { err "Install failed."; return 1; }
+    else
+        pkg update && pkg upgrade -y && pkg install -y x11-repo && pkg update || { err "pkg update/upgrade failed."; return 1; }
+        pkg install -y lxqt tigervnc chromium synaptic || { err "Install failed."; return 1; }
+    fi
+
+    # keep other shells pointing at the vnc display (harmless, proven)
+    if ! grep -q "txgui" "$HOME/.bashrc" 2>/dev/null; then
+        printf '\n# added by txgui\nexport DISPLAY=":1"\n' >> "$HOME/.bashrc"
+        ok "Added 'export DISPLAY=:1' to ~/.bashrc."
+    fi
+
+    save_config "$DESK"
+
+    echo
+    ok "Done! $DESK is installed."
+    echo -e "    Next: ${C_BOLD}./txgui start${C_RESET}"
+}
+
+# ----- start ------------------------------------------------------
+
+cmd_start() {
+    local desk="${1:-}"
+    if [ -z "$desk" ]; then
+        load_config
+        desk="$DESK"
+    else
+        case "$desk" in
+            xfce|lxqt) save_config "$desk" ;;
+            *) err "Unknown desktop \"$desk\" (use xfce or lxqt)."; return 1 ;;
+        esac
+    fi
+
+    if [ -z "$desk" ]; then
+        err "Nothing installed yet."
+        err "Run  ./txgui install   or   ./txgui start xfce"
+        return 1
+    fi
+
+    case "$desk" in
+        xfce) DE_START="startxfce4" ;;
+        lxqt) DE_START="startlxqt" ;;
+    esac
+
+    if ! command -v vncserver >/dev/null 2>&1; then
+        err "vncserver is missing - did install finish?"
+        err "Run  ./txgui install"
+        return 1
+    fi
+    if ! command -v "$DE_START" >/dev/null 2>&1; then
+        err "\"$DE_START\" is missing - did install finish?"
+        err "Run  ./txgui install"
+        return 1
+    fi
+
+    # the VNC password is asked here, once. Not during install.
+    if [ ! -f "$HOME/.vnc/passwd" ]; then
+        echo
+        info "No VNC password yet, let's make one."
+        info "You choose it, type it twice (>=6 chars)."
+        vncpasswd || { err "Password was not set."; return 1; }
+    fi
+
+    if vnc_up; then
+        info "$FIRST is already running, reusing it."
+    else
+        ok "Starting VNC server on $FIRST..."
+        vncserver "$FIRST" -localhost no -interface 0.0.0.0 || { err "VNC start failed."; return 1; }
+        ok "VNC server is up."
+    fi
+
+    # only one desktop can own the display, close the other first
+    for other in xfce lxqt; do
+        [ "$other" = "$desk" ] && continue
+        if session_up "$other"; then
+            info "$other is still running, closing it first."
+            stop_session "$other"
+        fi
+    done
+
+    if session_up "$desk"; then
+        info "$desk is already running, nothing to start."
+        return 0
+    fi
+
+    ok "Starting $desk..."
+    start_desktop "$DE_START"
+
+    echo
+    ok "Everything is up."
+    echo -e "    Connect a VNC app to: ${C_BOLD}$(my_ip):${PORT}${C_RESET}"
+    info "Empty IP? find your phone's wifi IP yourself."
+    info "Stop with:  ./txgui stop"
+}
+
+# ----- stop -------------------------------------------------------
+
+cmd_stop() {
+    local desk="${1:-}"
+    if [ -z "$desk" ]; then
+        load_config
+        desk="$DESK"
+    else
+        case "$desk" in
+            xfce|lxqt) ;;
+            *) err "Unknown desktop \"$desk\" (use xfce or lxqt)."; return 1 ;;
+        esac
+    fi
+
+    if [ -n "$desk" ]; then
+        ok "Stopping $desk desktop..."
+    else
+        ok "Stopping desktop..."
+    fi
+    stop_session "$desk"
+
+    # stop the vnc server too, no matter which desktop runs on it
+    if vnc_up; then
+        ok "Stopping VNC server $FIRST..."
+        vncserver -kill "$FIRST" 2>/dev/null
+        sleep 1
+        # just in case the kill needed a hand
+        pgrep -f "Xvnc.*:1([^0-9]|$)" >/dev/null 2>&1 && \
+            pkill -f "Xvnc.*:1([^0-9]|$)" 2>/dev/null
+        ok "VNC stopped."
+    else
+        info "VNC is not running."
+    fi
+    ok "All stopped."
+}
+
+# ----- status -----------------------------------------------------
+
+cmd_status() {
+    load_config
+    echo
+    info "Desktop installed    : ${DESK:-none}"
+    if vnc_up; then
+        ok  "VNC $FIRST            : running (port $PORT)"
+    else
+        err "VNC $FIRST            : not running"
+    fi
+    if session_up xfce || session_up lxqt; then
+        ok  "Desktop session      : running"
+    else
+        err "Desktop session      : not running"
+    fi
+    echo
+}
+
+# ----- help -------------------------------------------------------
+
+help_body() {
+    cat <<'EOF'
+  TXGUI - a full desktop on your phone
+  (XFCE or LXQt, seen over VNC)
+
+  FIRST TIME
+    ./txgui install        installs the desktop
+                           (asks which one you want)
+
+  EVERYDAY USE
+    ./txgui start          starts desktop + VNC
+    ./txgui stop           stops desktop + VNC
+    ./txgui status         shows what is running
+
+  WHICH DESKTOP
+    ./txgui start xfce       start the xfce desktop
+    ./txgui start lxqt       start the lxqt desktop
+    ./txgui stop xfce        stop xfce + VNC
+    ./txgui stop lxqt        stop lxqt + VNC
+    (plain start/stop use
+     the desktop you installed)
+
+  NOTES
+    * The VNC password is asked
+      once, at first start.
+    * Connect any VNC app to:
+      <your-ip>:5901
+    * Answers "y" to everything,
+      so it can run unattended.
+EOF
+}
+
+cmd_help() {
+    local w
+    w="${COLUMNS:-$(tput cols 2>/dev/null)}"
+    case "$w" in
+        ''|*[!0-9]*) w=80 ;;
+    esac
+    [ "$w" -lt 30 ] && w=30
+    if command -v fold >/dev/null 2>&1; then
+        help_body | fold -s -w "$w"
+    else
+        help_body
+    fi
+}
+
+# ----- main -------------------------------------------------------
+
+case "${1:-help}" in
+    install)                  cmd_install ;;
+    start)                    cmd_start "${2:-}" ;;
+    stop)                     cmd_stop "${2:-}" ;;
+    status)                   cmd_status ;;
+    help|-h|--help)           cmd_help ;;
+    *)
+        err "Unknown command: ${1:-}"
+        cmd_help
+        exit 1
+        ;;
+esac
