@@ -32,3 +32,28 @@ TXGUI - a full desktop on your phone
       <your-ip>:5901
     * Answers "y" to everything,
       so it can run unattended.
+## it doesn't contains any remove/delete subcommands, but here's how to delete the CLI and the desktop environment's if needed:
+
+### 1 the cli/script 
+
+``` bash 
+rm txgui 
+```
+### 2 the xfce desktop
+
+``` bash 
+apt remove xfce4
+```
+
+### 3 the lxqt desktop
+
+``` bash 
+apt remove lxqt
+```
+
+## additionally the vnc server is necessarily
+
+``` bash 
+apt remove tigervnc
+```
+
