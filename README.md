@@ -1,7 +1,7 @@
 # Easy-desktop-environment-for-termux-with-xfce-and-lxqt-natively
 ## install it with one click here :
 ```bash
-curl -sSL -o txgui https://github.com/jimkardy/Easy-desktop-environment-for-termux-with-xfce-and-lxqt-natively/releases/latest/download/txgui.txt && chmod +x txgui && ./txgui help
+curl -sSL -o txgui https://github.com/jimkardy/txgui/releases/latest/download/txgui.txt && chmod +x txgui && ./txgui help
  ```
 
 
